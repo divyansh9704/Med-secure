@@ -1,0 +1,7 @@
+Flask==3.0.3
+Flask-CORS==5.0.0
+cryptography==42.0.5
+Pillow==10.4.0
+numpy==1.26.4
+soundfile==0.12.1
+python-dotenv==1.0.1
