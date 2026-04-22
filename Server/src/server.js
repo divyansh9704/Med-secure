@@ -1,9 +1,9 @@
+import 'dotenv/config';                // ← must be FIRST so env vars are available to all imports
 import http from 'http';
 import express from 'express';
 import cors from 'cors';
 import rateLimit from 'express-rate-limit';
 import helmet from 'helmet';
-import dotenv from 'dotenv';
 import cookieParser from 'cookie-parser';
 import morgan from 'morgan';
 import mongoose from 'mongoose';
@@ -12,8 +12,6 @@ import authRoutes from './routes/auth.js';
 import messageRoutes from './routes/messages.js';
 import auditRoutes from './routes/audit.js';
 import debugRoutes from './routes/debug.js';
-
-dotenv.config();
 
 const app = express();
 
@@ -37,6 +35,7 @@ const messageLimiter = rateLimit({
 // Allow Vercel frontend and localhost for dev
 const allowedOrigins = [
   'http://localhost:5173',
+  'http://127.0.0.1:5173',
   'http://localhost:3000'
 ];
 
@@ -52,7 +51,9 @@ const corsConfig = {
     }
     return callback(new Error('Not allowed by CORS'));
   },
-  credentials: true
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
 };
 app.use(cors(corsConfig));
 
@@ -90,23 +91,34 @@ io.on('connection', (socket) => {
   });
 });
 
+// ── MongoDB connection with fallback ──
 const MONGO_URI = process.env.MONGO_URI;
+let dbConnected = false;
+
 if (!MONGO_URI) {
-  console.error('Missing MONGO_URI in env');
-  process.exit(1);
+  console.warn('[DB] Missing MONGO_URI in env — running in limited mode (no database)');
+} else {
+  try {
+    await mongoose.connect(MONGO_URI, {
+      serverSelectionTimeoutMS: 15000,
+      connectTimeoutMS: 15000,
+      socketTimeoutMS: 15000,
+    });
+    dbConnected = true;
+    console.log('[DB] MongoDB connected successfully');
+  } catch (err) {
+    console.error(`[DB] MongoDB connection failed: ${err.message}`);
+    console.warn('[DB] MongoDB unavailable — running in limited mode');
+  }
 }
 
-await mongoose.connect(process.env.MONGO_URI, {
-  dbName: process.env.MONGO_DB || 'MedSecure',
-  tls: true,
-  tlsAllowInvalidCertificates: true
-});
-
+// Expose DB status so routes can check it
+app.set('dbConnected', dbConnected);
 
 // Apply rate limiter to sensitive message endpoints
 app.use('/messages/send', messageLimiter);
 app.use('/messages/extract', messageLimiter);
-app.get('/health', (_req, res) => res.json({ ok: true }));
+app.get('/health', (_req, res) => res.json({ ok: true, db: dbConnected }));
 
 app.use('/auth', authRoutes);
 app.use('/messages', messageRoutes);

@@ -5,6 +5,7 @@ import jwt from 'jsonwebtoken';
 import User from '../models/User.js';
 import AuditLog from '../models/AuditLog.js';
 import speakeasy from 'speakeasy';
+import QRCode from 'qrcode';
 
 const router = express.Router();
 
@@ -29,6 +30,7 @@ router.post('/verify-totp', async (req, res) => {
     await user.save();
     return res.json({ ok: true, message: 'TOTP setup complete. You can now log in.' });
   } catch (e) {
+    console.error('[AUTH] TOTP verification error:', e.message);
     return res.status(500).json({ error: 'TOTP verification failed' });
   }
 });
@@ -53,8 +55,12 @@ router.post('/register', async (req, res) => {
   try {
     const { username, email, password, role } = req.body;
     if (!username || !password) return res.status(400).json({ error: 'Username & password required' });
+    if (!email) return res.status(400).json({ error: 'Email is required' });
     const exists = await User.findOne({ $or: [{ username }, { email: email?.toLowerCase() }] });
-    if (exists) return res.status(409).json({ error: 'User exists' });
+    if (exists) {
+      const field = exists.username === username ? 'Username' : 'Email';
+      return res.status(409).json({ error: `${field} already exists` });
+    }
     const passwordHash = await bcrypt.hash(password, 12);
     // Generate TOTP secret for Google Authenticator
     const totpSecret = speakeasy.generateSecret({
@@ -80,7 +86,8 @@ router.post('/register', async (req, res) => {
       }
     });
   } catch (e) {
-    return res.status(500).json({ error: 'Register failed' });
+    console.error('[AUTH] Registration error:', e.message);
+    return res.status(500).json({ error: `Registration failed: ${e.message}` });
   }
 });
 
@@ -96,22 +103,24 @@ router.post('/login', async (req, res) => {
 
     // If user does not have TOTP set up, initiate TOTP enrollment
     if (!user.totpSecret || !user.isTotpEnabled) {
-      // Generate a new TOTP secret
-      const speakeasy = require('speakeasy');
-      const qrcode = require('qrcode');
-      const secret = speakeasy.generateSecret({ name: `MedSecure (${user.email || user.username})` });
-      // Save secret temporarily in DB (not enabled until verified)
-      user.totpSecret = secret.base32;
-      await user.save();
-      // Generate QR code data URL
-      const otpauthUrl = secret.otpauth_url;
-      const qr = await qrcode.toDataURL(otpauthUrl);
-      return res.status(200).json({
-        requireTotpSetup: true,
-        qr,
-        otpauthUrl,
-        message: 'Scan the QR code with your authenticator app and enter the code to complete login.'
-      });
+      try {
+        const secret = speakeasy.generateSecret({ name: `MedSecure (${user.email || user.username})` });
+        // Save secret temporarily in DB (not enabled until verified)
+        user.totpSecret = secret.base32;
+        await user.save();
+        // Generate QR code data URL
+        const otpauthUrl = secret.otpauth_url;
+        const qr = await QRCode.toDataURL(otpauthUrl);
+        return res.status(200).json({
+          requireTotpSetup: true,
+          qr,
+          otpauthUrl,
+          message: 'Scan the QR code with your authenticator app and enter the code to complete login.'
+        });
+      } catch (qrErr) {
+        console.error('[AUTH] QR generation failed:', qrErr.message);
+        return res.status(500).json({ error: 'Failed to generate 2FA QR code' });
+      }
     }
     // Enforce TOTP verification if enabled for the account
     if (user.isTotpEnabled && user.totpSecret) {
@@ -146,6 +155,7 @@ router.post('/login', async (req, res) => {
       user: { username: user.username, email: user.email, role: user.role }
     });
   } catch (e) {
+    console.error('[AUTH] Login error:', e.message);
     return res.status(500).json({ error: 'Login failed' });
   }
 });
